@@ -2,143 +2,121 @@ package providers
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"time"
 
-	"github.com/emarc09/fuelcheck/internal/auth"
-	"github.com/emarc09/fuelcheck/internal/i18n"
+	"github.com/fxescandell/fuelcheck/internal/auth"
 )
 
-const (
-	codexUsageURL = "https://chatgpt.com/backend-api/wham/usage"
-)
+const codexUsageURL = "https://chatgpt.com/backend-api/wham/usage"
 
-// FetchCodexUsage fetches usage data from the Codex/ChatGPT API.
-func FetchCodexUsage() *ProviderResult {
-	result := &ProviderResult{Provider: "Codex", OK: false}
-
-	creds, err := auth.GetCodexCredentials()
-	if err != nil {
-		result.Error = err.Error()
-		return result
+// ParseCodexUsage transforma la respuesta de Codex en ventanas de uso.
+func ParseCodexUsage(body []byte) (*ProviderResult, error) {
+	var response struct {
+		RateLimit json.RawMessage `json:"rate_limit"`
 	}
-
-	result.Email = creds.Email
-
-	body, statusCode, err := doCodexRequest(creds)
-	if err != nil {
-		result.Error = i18n.Tf("err.connection", err)
-		return result
+	if err := json.Unmarshal(body, &response); err != nil {
+		return nil, fmt.Errorf("error al interpretar el JSON: %w", err)
 	}
-
-	if statusCode == http.StatusUnauthorized || statusCode == http.StatusForbidden {
-		if refreshErr := creds.RefreshToken(); refreshErr != nil {
-			result.Error = i18n.Tf("err.codex.token_expired", refreshErr)
-			return result
+	if len(response.RateLimit) == 0 {
+		return nil, fmt.Errorf("respuesta de Codex sin campo de cuota")
+	}
+	result := &ProviderResult{Provider: "Codex", OK: true}
+	if string(response.RateLimit) == "null" {
+		return result, nil
+	}
+	var limits struct {
+		Primary *struct {
+			UsedPercent *float64 `json:"used_percent"`
+			ResetAt     *float64 `json:"reset_at"`
+		} `json:"primary_window"`
+		Secondary *struct {
+			UsedPercent *float64 `json:"used_percent"`
+			ResetAt     *float64 `json:"reset_at"`
+		} `json:"secondary_window"`
+	}
+	if err := json.Unmarshal(response.RateLimit, &limits); err != nil {
+		return nil, fmt.Errorf("error al interpretar las ventanas de Codex: %w", err)
+	}
+	add := func(kind string, used *float64, reset *float64) error {
+		if used == nil || *used < 0 || *used > 100 {
+			return fmt.Errorf("consumo inválido en ventana %s", kind)
 		}
+		w := UsageWindow{Kind: kind, UsedPercent: *used}
+		if reset != nil && *reset > 0 {
+			if *reset >= firstInvalidJSONUnixSecond {
+				return fmt.Errorf("reinicio fuera del rango de fechas admitido")
+			}
+			t := time.Unix(int64(*reset), 0).UTC()
+			w.ResetsAt = &t
+		}
+		result.Windows = append(result.Windows, w)
+		return nil
+	}
+	if w := limits.Primary; w != nil {
+		if err := add("corta", w.UsedPercent, w.ResetAt); err != nil {
+			return nil, err
+		}
+	}
+	if w := limits.Secondary; w != nil {
+		if err := add("semanal", w.UsedPercent, w.ResetAt); err != nil {
+			return nil, err
+		}
+	}
+	return result, nil
+}
 
-		body, statusCode, err = doCodexRequest(creds)
+// FetchCodexUsage consulta la cuota usando las credenciales del usuario.
+func FetchCodexUsage(configuredKey, endpoint string) *ProviderResult {
+	fail := func(err error) *ProviderResult { return &ProviderResult{Provider: "Codex", Error: err.Error()} }
+	creds, err := auth.GetCodexCredentials(configuredKey)
+	if err != nil {
+		return fail(err)
+	}
+	body, status, err := doCodexRequest(creds, endpoint)
+	if err != nil {
+		return fail(fmt.Errorf("error de conexión: %w", err))
+	}
+	if status == http.StatusUnauthorized || status == http.StatusForbidden {
+		if configuredKey != "" {
+			return fail(fmt.Errorf("la API rechazó el token de Codex configurado; sustitúyelo en el fichero de configuración"))
+		}
+		if err := creds.RefreshToken(); err != nil {
+			return fail(fmt.Errorf("el token caducó y no se pudo refrescar: %w", err))
+		}
+		body, status, err = doCodexRequest(creds, endpoint)
 		if err != nil {
-			result.Error = i18n.Tf("err.connection_retry", err)
-			return result
+			return fail(fmt.Errorf("error de conexión tras refrescar el token: %w", err))
 		}
 	}
-
-	if statusCode != http.StatusOK {
-		result.Error = i18n.Tf("err.api_status", statusCode)
-		return result
+	if status != http.StatusOK {
+		return fail(fmt.Errorf("la API respondió con estado %d", status))
 	}
-
-	var usage codexUsageResponse
-	if err := json.Unmarshal(body, &usage); err != nil {
-		result.Error = i18n.Tf("err.parse_json", err)
-		return result
+	result, err := ParseCodexUsage(body)
+	if err != nil {
+		return fail(err)
 	}
-
-	var rawJSON interface{}
-	_ = json.Unmarshal(body, &rawJSON)
-	result.RawJSON = rawJSON
-
-	result.PlanType = capitalize(usage.PlanType)
-	result.OK = true
-
-	if usage.RateLimit.PrimaryWindow.UsedPercent > 0 || usage.RateLimit.PrimaryWindow.ResetAt > 0 {
-		remaining := max(0, int(100-usage.RateLimit.PrimaryWindow.UsedPercent+0.5))
-		w := UsageWindow{
-			Label:       i18n.T("window.5h"),
-			UsedPercent: usage.RateLimit.PrimaryWindow.UsedPercent,
-			Remaining:   remaining,
-		}
-		if usage.RateLimit.PrimaryWindow.ResetAt > 0 {
-			t := time.Unix(int64(usage.RateLimit.PrimaryWindow.ResetAt), 0).Local()
-			w.ResetsAt = &t
-		}
-		if usage.RateLimit.PrimaryWindow.ResetAfterSeconds > 0 {
-			w.ResetSeconds = int64(usage.RateLimit.PrimaryWindow.ResetAfterSeconds)
-		}
-		result.Windows = append(result.Windows, w)
-	}
-
-	if usage.RateLimit.SecondaryWindow.UsedPercent > 0 || usage.RateLimit.SecondaryWindow.ResetAt > 0 {
-		remaining := max(0, int(100-usage.RateLimit.SecondaryWindow.UsedPercent+0.5))
-		w := UsageWindow{
-			Label:       i18n.T("window.weekly"),
-			UsedPercent: usage.RateLimit.SecondaryWindow.UsedPercent,
-			Remaining:   remaining,
-		}
-		if usage.RateLimit.SecondaryWindow.ResetAt > 0 {
-			t := time.Unix(int64(usage.RateLimit.SecondaryWindow.ResetAt), 0).Local()
-			w.ResetsAt = &t
-		}
-		if usage.RateLimit.SecondaryWindow.ResetAfterSeconds > 0 {
-			w.ResetSeconds = int64(usage.RateLimit.SecondaryWindow.ResetAfterSeconds)
-		}
-		result.Windows = append(result.Windows, w)
-	}
-
 	return result
 }
 
-func doCodexRequest(creds *auth.CodexCredentials) ([]byte, int, error) {
-	req, err := http.NewRequest("GET", codexUsageURL, nil)
+func doCodexRequest(creds *auth.CodexCredentials, endpoint string) ([]byte, int, error) {
+	req, err := http.NewRequest("GET", resolveURL(endpoint, codexUsageURL), nil)
 	if err != nil {
 		return nil, 0, err
 	}
-
 	req.Header.Set("Authorization", "Bearer "+creds.AccessToken)
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", "CodexBar")
 	if creds.AccountID != "" {
 		req.Header.Set("ChatGPT-Account-Id", creds.AccountID)
 	}
-
 	resp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, 0, err
 	}
 	defer resp.Body.Close()
-
 	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, resp.StatusCode, err
-	}
-
-	return body, resp.StatusCode, nil
-}
-
-type codexUsageResponse struct {
-	PlanType  string `json:"plan_type"`
-	RateLimit struct {
-		PrimaryWindow struct {
-			UsedPercent       float64 `json:"used_percent"`
-			ResetAt           float64 `json:"reset_at"`
-			ResetAfterSeconds float64 `json:"reset_after_seconds"`
-		} `json:"primary_window"`
-		SecondaryWindow struct {
-			UsedPercent       float64 `json:"used_percent"`
-			ResetAt           float64 `json:"reset_at"`
-			ResetAfterSeconds float64 `json:"reset_after_seconds"`
-		} `json:"secondary_window"`
-	} `json:"rate_limit"`
+	return body, resp.StatusCode, err
 }

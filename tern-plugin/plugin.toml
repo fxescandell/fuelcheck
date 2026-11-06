@@ -1,0 +1,8 @@
+schema = 1
+id = "ai-usage"
+name = "AI Usage"
+version = "0.1.0"
+description = "Cuotas de los proveedores de AI coding plans"
+host = "host.luau"
+window = "window.luau"
+styles = ["style.css"]

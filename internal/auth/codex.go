@@ -10,8 +10,6 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
-
-	"github.com/emarc09/fuelcheck/internal/i18n"
 )
 
 const (
@@ -30,7 +28,10 @@ type CodexCredentials struct {
 }
 
 // GetCodexCredentials reads authentication from ~/.codex/auth.json.
-func GetCodexCredentials() (*CodexCredentials, error) {
+func GetCodexCredentials(configuredKey string) (*CodexCredentials, error) {
+	if configuredKey != "" {
+		return &CodexCredentials{AccessToken: configuredKey, AccountID: accountFromJWT(configuredKey)}, nil
+	}
 	paths := codexAuthPaths()
 	for _, p := range paths {
 		data, err := os.ReadFile(p)
@@ -66,7 +67,7 @@ func GetCodexCredentials() (*CodexCredentials, error) {
 		}
 	}
 
-	return nil, fmt.Errorf("%s", i18n.T("err.codex.no_auth"))
+	return nil, fmt.Errorf("no se encontró ~/.codex/auth.json.\nInicia sesión con el CLI de Codex")
 }
 
 // RefreshToken refreshes the access token using the refresh token.
@@ -181,6 +182,27 @@ func emailFromJWT(token string) string {
 	}
 
 	return claims.Email
+}
+
+// accountFromJWT extrae la cuenta del propio token, sin usar otra credencial.
+func accountFromJWT(token string) string {
+	parts := strings.Split(token, ".")
+	if len(parts) < 2 {
+		return ""
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return ""
+	}
+	var claims struct {
+		Auth struct {
+			AccountID string `json:"chatgpt_account_id"`
+		} `json:"https://api.openai.com/auth"`
+	}
+	if json.Unmarshal(payload, &claims) != nil {
+		return ""
+	}
+	return claims.Auth.AccountID
 }
 
 // codexAuthPaths returns possible auth file locations.

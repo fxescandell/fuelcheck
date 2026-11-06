@@ -2,264 +2,100 @@ package ui
 
 import (
 	"fmt"
-	"os"
+	"math"
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/lipgloss"
-	"github.com/emarc09/fuelcheck/internal/i18n"
-	"github.com/emarc09/fuelcheck/internal/providers"
+	"github.com/fxescandell/fuelcheck/internal/providers"
+	"github.com/rivo/uniseg"
 )
 
-// redactEmail replaces an email with a masked version when FUELCHECK_REDACT_EMAIL is set.
-func redactEmail(email string) string {
-	if os.Getenv("FUELCHECK_REDACT_EMAIL") == "" || email == "" {
-		return email
-	}
-	parts := strings.SplitN(email, "@", 2)
-	if len(parts) != 2 {
-		return "***"
-	}
-	first := string(parts[0][0])
-	return first + "***@" + parts[1]
-}
-
-// Colors.
-var (
-	colorGreen  = lipgloss.Color("#04B575")
-	colorYellow = lipgloss.Color("#F8D948")
-	colorRed    = lipgloss.Color("#F653A6")
-	colorCyan   = lipgloss.Color("#00BFFF")
-	colorDim    = lipgloss.Color("#666666")
-	colorWhite  = lipgloss.Color("#FFFFFF")
-)
-
-// Styles.
-var (
-	titleStyle = lipgloss.NewStyle().
-			Bold(true).
-			Foreground(colorCyan).
-			MarginBottom(1)
-
-	labelStyle = lipgloss.NewStyle().
-			Foreground(colorCyan)
-
-	valueStyle = lipgloss.NewStyle().
-			Bold(true).
-			Foreground(colorWhite)
-
-	dimStyle = lipgloss.NewStyle().
-			Foreground(colorDim)
-
-	sectionLabelStyle = lipgloss.NewStyle().
-				Foreground(colorWhite)
-
-	errorStyle = lipgloss.NewStyle().
-			Foreground(colorRed).
-			Bold(true)
-
-	hintStyle = lipgloss.NewStyle().
-			Foreground(colorDim).
-			Italic(true)
-
-	cardStyle = lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color("#444444")).
-			Padding(1, 2)
-)
-
-const barWidth = 22
-
-// Banner returns the styled fuelcheck banner string.
-func Banner() string {
-	return renderBanner()
-}
-
-// renderBanner creates the styled fuelcheck banner with ASCII art flame.
-func renderBanner() string {
-	flameTopStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#FFD700")).Bold(true)
-	flameStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#FF6B35")).Bold(true)
-	nameStyle := lipgloss.NewStyle().Foreground(colorCyan).Bold(true)
-	tagStyle := dimStyle
-
-	line1 := flameTopStyle.Render("  (  ") + nameStyle.Render("┏━╸╻ ╻┏━╸╻  ┏━╸╻ ╻┏━╸┏━╸╻┏")
-	line2 := flameTopStyle.Render(" )\\) ") + nameStyle.Render("┣╸ ┃ ┃┣╸ ┃  ┃  ┣━┫┣╸ ┃  ┣┻┓")
-	line3 := flameStyle.Render("((_) ") + nameStyle.Render("╹  ┗━┛┗━╸┗━╸┗━╸╹ ╹┗━╸┗━╸╹ ╹")
-
-	tagline := tagStyle.Render("            " + i18n.T("ui.tagline"))
-
-	return line1 + "\n" + line2 + "\n" + line3 + "\n" + tagline
-}
-
-// Render renders all provider results as styled terminal output.
-func Render(results []*providers.ProviderResult) string {
-	var sections []string
-
-	sections = append(sections, renderBanner())
-
+// Render devuelve una sola línea; now y color permiten una presentación determinista.
+func Render(results []*providers.ProviderResult, now time.Time, color bool) string {
+	width := 0
 	for _, r := range results {
-		card := renderProvider(r)
-		if card != "" {
-			sections = append(sections, card)
+		if n := uniseg.StringWidth(r.Provider); n > width {
+			width = n
 		}
 	}
-
-	return strings.Join(sections, "\n\n")
+	parts := make([]string, 0, len(results))
+	for _, r := range results {
+		shade := 90
+		if r.OK && len(r.Windows) > 0 {
+			worst := 0.0
+			hasFinite := false
+			for _, w := range r.Windows {
+				if !w.Unlimited {
+					hasFinite = true
+					if w.UsedPercent > worst {
+						worst = w.UsedPercent
+					}
+				}
+			}
+			if hasFinite {
+				shade = health(worst)
+			}
+		}
+		part := paint("●", shade, color) + " " + paint(r.Provider, shade, color) + strings.Repeat(" ", width-uniseg.StringWidth(r.Provider))
+		if !r.OK {
+			parts = append(parts, part+" error: "+strings.Join(strings.Fields(r.Error), " "))
+			continue
+		}
+		if len(r.Windows) == 0 {
+			parts = append(parts, part+" sin cuota")
+			continue
+		}
+		dots := ""
+		for i := range r.Windows {
+			index := i
+			if len(r.Windows) == 2 && r.Windows[0].Kind == "semanal" && r.Windows[1].Kind == "corta" {
+				index = 1 - i
+			}
+			w := r.Windows[index]
+			if w.Unlimited {
+				part += " ilimitado"
+				dots += paint("●", 90, color)
+				continue
+			}
+			part += fmt.Sprintf(" %d%% %s", int(math.Round(w.UsedPercent)), countdown(w.ResetsAt, now))
+			dots += paint("●", health(w.UsedPercent), color)
+		}
+		parts = append(parts, part+" "+dots)
+	}
+	return strings.Join(parts, " │ ")
 }
 
-func renderProvider(r *providers.ProviderResult) string {
-	title := titleStyle.Render(r.Provider)
-
-	if !r.OK {
-		errMsg := errorStyle.Render("Error: " + r.Error)
-		content := title + "\n" + errMsg
-		return cardStyle.Render(content)
-	}
-
-	var lines []string
-	lines = append(lines, title)
-
-	meta := renderMetadata(r)
-	if meta != "" {
-		lines = append(lines, meta)
-	}
-
-	if r.Hint != "" {
-		lines = append(lines, hintStyle.Render(r.Hint))
-	}
-
-	for _, w := range r.Windows {
-		lines = append(lines, "")
-		lines = append(lines, sectionLabelStyle.Render(w.Label+":"))
-		lines = append(lines, "")
-		lines = append(lines, renderBar(w.Remaining))
-		if w.ResetsAt != nil {
-			lines = append(lines, dimStyle.Render(i18n.Tf("ui.resets_at", formatTime(w.ResetsAt))))
-		}
-	}
-
-	for _, m := range r.Models {
-		remaining := int(m.RemainingPercent + 0.5)
-		lines = append(lines, "")
-		lines = append(lines, sectionLabelStyle.Render(m.TierName+":"))
-		lines = append(lines, "")
-		lines = append(lines, renderBar(remaining))
-		if m.ResetsAt != nil {
-			lines = append(lines, dimStyle.Render(i18n.Tf("ui.resets_at", formatTime(m.ResetsAt))))
-		}
-	}
-
-	return cardStyle.Render(strings.Join(lines, "\n"))
-}
-
-func renderMetadata(r *providers.ProviderResult) string {
-	var parts []string
-
-	email := redactEmail(r.Email)
-
-	switch r.Provider {
-	case "Claude":
-		if r.Plan != "" {
-			parts = append(parts, labelStyle.Render(i18n.T("ui.plan"))+valueStyle.Render(r.Plan))
-		}
-		if email != "" {
-			parts = append(parts, labelStyle.Render(i18n.T("ui.email"))+valueStyle.Render(email))
-		}
-		if r.Tier != "" {
-			parts = append(parts, labelStyle.Render(i18n.T("ui.tier"))+valueStyle.Render(r.Tier))
-		}
-		if r.Source != "" {
-			parts = append(parts, labelStyle.Render(i18n.T("ui.source"))+valueStyle.Render(r.Source))
-		}
-	case "Codex":
-		if r.PlanType != "" {
-			parts = append(parts, labelStyle.Render(i18n.T("ui.plan"))+valueStyle.Render(r.PlanType))
-		}
-		if email != "" {
-			parts = append(parts, labelStyle.Render(i18n.T("ui.email"))+valueStyle.Render(email))
-		}
-	case "Gemini":
-		if r.GeminiTier != "" {
-			parts = append(parts, labelStyle.Render(i18n.T("ui.tier"))+valueStyle.Render(r.GeminiTier))
-		}
-		if email != "" {
-			parts = append(parts, labelStyle.Render(i18n.T("ui.email"))+valueStyle.Render(email))
-		}
-		if r.AuthMethod != "" {
-			parts = append(parts, labelStyle.Render(i18n.T("ui.auth"))+valueStyle.Render(r.AuthMethod))
-		}
-		if r.TokenRefreshed {
-			parts = append(parts, dimStyle.Render(i18n.T("ui.token_refreshed")))
-		}
-	case "Antigravity":
-		if r.PlanType != "" {
-			parts = append(parts, labelStyle.Render(i18n.T("ui.plan"))+valueStyle.Render(r.PlanType))
-		}
-		if email != "" {
-			parts = append(parts, labelStyle.Render(i18n.T("ui.email"))+valueStyle.Render(email))
-		}
-	}
-
-	return strings.Join(parts, "\n")
-}
-
-func renderBar(remainingPct int) string {
-	if remainingPct < 0 {
-		remainingPct = 0
-	}
-	if remainingPct > 100 {
-		remainingPct = 100
-	}
-
-	filled := int(float64(remainingPct) / 100.0 * float64(barWidth))
-	empty := barWidth - filled
-
-	var accent lipgloss.Color
+func health(used float64) int {
 	switch {
-	case remainingPct >= 70:
-		accent = colorGreen
-	case remainingPct >= 35:
-		accent = colorYellow
+	case used <= 30:
+		return 32
+	case used <= 65:
+		return 33
 	default:
-		accent = colorRed
+		return 31
 	}
-
-	barFilled := lipgloss.NewStyle().Foreground(accent).Render(strings.Repeat("█", filled))
-	barEmpty := dimStyle.Render(strings.Repeat("░", empty))
-	pctText := lipgloss.NewStyle().Bold(true).Foreground(accent).Render(" " + i18n.Tf("ui.remaining", remainingPct))
-
-	return barFilled + barEmpty + pctText
 }
 
-func formatTime(t *time.Time) string {
-	if t == nil {
-		return ""
+func paint(s string, colorCode int, enabled bool) string {
+	if !enabled {
+		return s
 	}
+	return fmt.Sprintf("\x1b[%dm%s\x1b[0m", colorCode, s)
+}
 
-	now := time.Now()
-
-	hour := t.Hour()
-	minute := t.Minute()
-	ampm := i18n.T("time.am")
-	if hour >= 12 {
-		ampm = i18n.T("time.pm")
+func countdown(reset *time.Time, now time.Time) string {
+	if reset == nil {
+		return "—"
 	}
-	if hour > 12 {
-		hour -= 12
+	d := reset.Sub(now)
+	if d < 0 {
+		d = 0
 	}
-	if hour == 0 {
-		hour = 12
+	if d < time.Hour {
+		return fmt.Sprintf("%dm", int(d.Minutes()))
 	}
-
-	timeStr := fmt.Sprintf("%d:%02d %s", hour, minute, ampm)
-
-	if t.Year() == now.Year() && t.Month() == now.Month() && t.Day() == now.Day() {
-		return timeStr
+	if d < 24*time.Hour {
+		return fmt.Sprintf("%dh %02dm", int(d.Hours()), int(d.Minutes())%60)
 	}
-
-	month := i18n.MonthName(int(t.Month()))
-	if i18n.Current() == i18n.ES {
-		return fmt.Sprintf("%d %s %d %s", t.Day(), month, t.Year(), timeStr)
-	}
-	return fmt.Sprintf("%s %d, %d %s", month, t.Day(), t.Year(), timeStr)
+	return fmt.Sprintf("%dd %02dh", int(d.Hours())/24, int(d.Hours())%24)
 }

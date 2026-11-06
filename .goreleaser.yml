@@ -1,6 +1,6 @@
 version: 2
 
-project_name: fuelcheck
+project_name: ai-usage
 
 before:
   hooks:
@@ -8,9 +8,9 @@ before:
     - go test ./...
 
 builds:
-  - id: fuelcheck
-    main: ./cmd/fuelcheck/
-    binary: fuelcheck
+  - id: ai-usage
+    main: ./cmd/ai-usage/
+    binary: ai-usage
     env:
       - CGO_ENABLED=0
     goos:
@@ -45,7 +45,7 @@ changelog:
 
 release:
   github:
-    owner: emanuelarcos
+    owner: fxescandell
     name: fuelcheck
   draft: false
   prerelease: auto
@@ -53,12 +53,12 @@ release:
   extra_files:
     - glob: install.sh
   header: |
-    ## fuelcheck {{.Tag}}
+    ## ai-usage {{.Tag}}
 
     ### Install
 
     ```bash
-    curl -fsSL https://github.com/emanuelarcos/fuelcheck/releases/latest/download/install.sh | sh
+    curl -fsSL https://raw.githubusercontent.com/fxescandell/fuelcheck/main/install.sh | sh
     ```
 
     Or download the binary for your platform below.

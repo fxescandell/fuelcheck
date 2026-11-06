@@ -24,7 +24,7 @@ jobs:
         run: go vet ./...
 
       - name: Build
-        run: go build -o fuelcheck ./cmd/fuelcheck/
+        run: go build -o ai-usage ./cmd/ai-usage/
 
       - name: Verify binary
-        run: ./fuelcheck --version
+        run: ./ai-usage --version

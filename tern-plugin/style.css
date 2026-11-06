@@ -1,0 +1,36 @@
+/* El control del plugin sigue visible sin pasar el cursor por Archivos. */
+.ft-head .ft-plugin[data-plugin='ai-usage'][data-id='toggle'] {
+	opacity: 1 !important;
+	transform: none !important;
+}
+
+.ft-head .ft-plugin[data-plugin='ai-usage'][data-id='toggle'] svg.ico {
+	width: 18px;
+	height: 18px;
+	color: var(--t1);
+}
+
+#statusline .sl-plugin[data-plugin='ai-usage'] svg.ico {
+	width: 13px;
+	height: 13px;
+	color: var(--t1);
+}
+
+.ft-head .ft-plugin[data-plugin='ai-usage'][data-id='toggle'] svg.ico *,
+#statusline .sl-plugin[data-plugin='ai-usage'] svg.ico * {
+	stroke-width: 1.5 !important;
+}
+
+#statusline .sl-plugin[data-plugin='ai-usage'][data-tone='ai-usage-reset'] {
+	color: var(--t4);
+}
+
+#statusline .sl-plugin[data-plugin='ai-usage'][data-tone='ai-usage-reset'] svg.ico {
+	color: inherit;
+}
+
+@media (max-width: 900px) {
+	#statusline .sl-plugin[data-plugin='ai-usage'][data-tone='ai-usage-reset'] {
+		display: none;
+	}
+}

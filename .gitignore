@@ -1,6 +1,7 @@
 # Binaries (root level only)
-/fuelcheck
+/ai-usage
 /ai-limits
+/fuelcheck
 *.exe
 
 # Go
